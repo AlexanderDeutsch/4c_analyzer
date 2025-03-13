@@ -5,8 +5,15 @@ import datetime
 from datetime import datetime
 import json
 import numpy as np
-
-
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.text import Text
+from rich.box import ROUNDED
+from datetime import datetime
+import time
+from rich.prompt import Prompt
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -1116,16 +1123,28 @@ def detect_top_book_imbalance(game_data, game_df):
 
 
 
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.layout import Layout
-from rich.text import Text
-from rich.box import ROUNDED
-from datetime import datetime
-import time
+
 
 console = Console()
+
+
+#New function for menu navigation
+def navigate_menus(current_menu_func, *args, **kwargs):
+    """
+    Navigation wrapper function that supports going back
+    Returns True if user wants to go back, False if they want to exit
+    """
+    while True:
+        # Call the current menu function
+        result = current_menu_func(*args, **kwargs)
+        
+        if result == "back":
+            return True  # Go back to previous menu
+        elif result == "exit":
+            return False  # Exit completely
+        elif result == "main":
+            return "main"  # Return to main menu
+        
 
 def create_dashboard(analyses):
     """Create a rich dashboard layout with comprehensive orderbook analysis data"""
@@ -2103,6 +2122,9 @@ def inspect_database(db_path='orderbook_analyzer.db'):
     table_info.add_column("Table Name", style="cyan")
     table_info.add_column("Column Name", style="yellow")
     table_info.add_column("Type", style="green")
+    table_info.add_column("Not Null", style="magenta")
+    table_info.add_column("Default", style="blue")
+    table_info.add_column("Primary Key", style="red")
     
     for table_name in tables:
         table_name = table_name[0]
@@ -2112,12 +2134,16 @@ def inspect_database(db_path='orderbook_analyzer.db'):
         for i, col in enumerate(columns):
             table_info.add_row(
                 table_name if i == 0 else "",
-                col[1],  # Column name
-                col[2]   # Data type
+                col[1],         # Column name
+                col[2],         # Data type
+                "Yes" if col[3] else "No",  # Not Null
+                str(col[4]) if col[4] is not None else "",  # Default value
+                "Yes" if col[5] else "No"   # Primary Key
             )
     
     console.print(table_info)
     conn.close()
+
 
 def count_table_rows(db_path='orderbook_analyzer.db'):
     """Count the number of rows in each table"""
@@ -2146,46 +2172,73 @@ def sample_table_data(table_name, limit=5, db_path='orderbook_analyzer.db'):
     conn = sqlite3.connect(db_path)
     
     try:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        total_rows = cursor.fetchone()[0]
+        
+        # Get column names
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = [col[1] for col in cursor.fetchall()]
+        
         # Read data into DataFrame for easy display
         df = pd.read_sql_query(f"SELECT * FROM {table_name} LIMIT {limit}", conn)
         
         if len(df) == 0:
             console.print(f"[yellow]No data found in table: {table_name}[/yellow]")
             return
+            
+        # Format table for display
+        sample_table = Table(title=f"Sample Data from {table_name} ({len(df)} of {total_rows} rows)")
         
-        # Expand any JSON columns
-        json_cols = []
+        # Add columns with appropriate width constraints
         for col in df.columns:
-            # Try to parse the first non-null value as JSON
-            sample = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
-            if isinstance(sample, str) and sample.startswith('{') and sample.endswith('}'):
+            if "data" in col.lower() or col.lower().endswith("_json"):
+                # JSON columns get truncated display
+                sample_table.add_column(col, max_width=40)
+            else:
+                sample_table.add_column(col)
+                
+        # Add rows
+        for _, row in df.iterrows():
+            values = []
+            for col in df.columns:
+                val = row[col]
+                # Format JSON columns nicely
+                if isinstance(val, str) and val.startswith('{') and val.endswith('}'):
+                    try:
+                        val = json.dumps(json.loads(val), indent=2)
+                        if len(val) > 40:
+                            val = val[:37] + "..."
+                    except:
+                        pass
+                values.append(str(val))
+            sample_table.add_row(*values)
+            
+        console.print(sample_table)
+        
+        # For JSON columns, offer to show full content for a specific row
+        json_cols = [col for col in df.columns if "data" in col.lower() or col.lower().endswith("_json")]
+        if json_cols and len(df) > 0:
+            console.print("\n[bold]JSON columns detected. View full content?[/bold]")
+            view_json = Prompt.ask("View JSON for row #", choices=[str(i) for i in range(1, len(df)+1)] + ["n"], default="n")
+            
+            if view_json != "n":
+                row_idx = int(view_json) - 1
+                col = Prompt.ask("Select column", choices=json_cols)
+                
                 try:
-                    json.loads(sample)
-                    json_cols.append(col)
-                except:
-                    pass
-        
-        # Print basic table info
-        console.print(f"[bold cyan]Sample data from table: {table_name}[/bold cyan]")
-        console.print(f"Columns: {', '.join(df.columns.tolist())}")
-        console.print(f"Rows displayed: {len(df)} of {limit} requested")
-        
-        # Print DataFrame
-        console.print("\n[bold]Data sample:[/bold]")
-        console.print(df)
-        
-        # Pretty print any JSON columns
-        for col in json_cols:
-            console.print(f"\n[bold]Contents of JSON column: {col}[/bold]")
-            sample_row = df.iloc[0]
-            json_data = json.loads(sample_row[col])
-            console.print(json.dumps(json_data, indent=2))
+                    json_data = json.loads(df.iloc[row_idx][col])
+                    console.print(f"\n[bold]Full content of {col} for row {row_idx+1}:[/bold]")
+                    console.print(json.dumps(json_data, indent=2))
+                except Exception as e:
+                    console.print(f"[bold red]Error parsing JSON: {str(e)}[/bold red]")
     
     except Exception as e:
         console.print(f"[bold red]Error inspecting table {table_name}: {str(e)}[/bold red]")
     
     finally:
         conn.close()
+
 
 def query_signals(hours=24, db_path='orderbook_analyzer.db'):
     """Query recent signals from the database"""
@@ -2230,6 +2283,435 @@ def query_signals(hours=24, db_path='orderbook_analyzer.db'):
     
     console.print(signals_table)
     conn.close()
+
+def query_signals_by_type(signal_type, db_path='orderbook_analyzer.db'):
+    """Query signals by type"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT s.id, s.game_id, s.timestamp, s.signal_type, s.market, s.team, 
+           s.strength, s.imbalance_ratio, 
+           g.home_team, g.away_team, g.event_name
+    FROM signals s
+    JOIN games g ON s.game_id = g.game_id
+    WHERE s.signal_type = ?
+    ORDER BY s.timestamp DESC
+    LIMIT 50
+    """
+    
+    cursor.execute(query, [signal_type])
+    rows = cursor.fetchall()
+    
+    signals_table = Table(title=f"Signals by Type: {signal_type}")
+    signals_table.add_column("ID", style="dim")
+    signals_table.add_column("Game", style="cyan")
+    signals_table.add_column("Market", style="magenta")
+    signals_table.add_column("Team", style="green")
+    signals_table.add_column("Strength", style="blue")
+    signals_table.add_column("Ratio", style="red")
+    signals_table.add_column("Timestamp", style="dim")
+    
+    for row in rows:
+        signals_table.add_row(
+            str(row['id']),
+            f"{row['away_team']} @ {row['home_team']}",
+            row['market'],
+            row['team'],
+            row['strength'] or "N/A",
+            f"{row['imbalance_ratio']:.2f}x" if row['imbalance_ratio'] > 0 else "N/A",
+            row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        )
+    
+    console.print(signals_table)
+    conn.close()
+
+
+def query_signals_by_market(market, db_path='orderbook_analyzer.db'):
+    """Query signals by market"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT s.id, s.game_id, s.timestamp, s.signal_type, s.market, s.team, 
+           s.strength, s.imbalance_ratio, 
+           g.home_team, g.away_team, g.event_name
+    FROM signals s
+    JOIN games g ON s.game_id = g.game_id
+    WHERE s.market LIKE ?
+    ORDER BY s.timestamp DESC
+    LIMIT 50
+    """
+    
+    cursor.execute(query, [f"%{market}%"])
+    rows = cursor.fetchall()
+    
+    signals_table = Table(title=f"Signals by Market: {market}")
+    signals_table.add_column("ID", style="dim")
+    signals_table.add_column("Game", style="cyan")
+    signals_table.add_column("Signal Type", style="yellow")
+    signals_table.add_column("Team", style="green")
+    signals_table.add_column("Strength", style="blue")
+    signals_table.add_column("Ratio", style="red")
+    signals_table.add_column("Timestamp", style="dim")
+    
+    for row in rows:
+        signals_table.add_row(
+            str(row['id']),
+            f"{row['away_team']} @ {row['home_team']}",
+            row['signal_type'],
+            row['team'],
+            row['strength'] or "N/A",
+            f"{row['imbalance_ratio']:.2f}x" if row['imbalance_ratio'] > 0 else "N/A",
+            row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        )
+    
+    console.print(signals_table)
+    conn.close()
+def query_signals_by_team(team, db_path='orderbook_analyzer.db'):
+    """Query signals for a specific team"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT s.id, s.game_id, s.timestamp, s.signal_type, s.market, s.team, 
+           s.strength, s.imbalance_ratio, 
+           g.home_team, g.away_team, g.event_name
+    FROM signals s
+    JOIN games g ON s.game_id = g.game_id
+    WHERE s.team LIKE ? OR g.home_team LIKE ? OR g.away_team LIKE ?
+    ORDER BY s.timestamp DESC
+    LIMIT 50
+    """
+    
+    cursor.execute(query, [f"%{team}%", f"%{team}%", f"%{team}%"])
+    rows = cursor.fetchall()
+    
+    signals_table = Table(title=f"Signals for Team: {team}")
+    signals_table.add_column("ID", style="dim")
+    signals_table.add_column("Game", style="cyan")
+    signals_table.add_column("Signal Type", style="yellow")
+    signals_table.add_column("Market", style="magenta")
+    signals_table.add_column("Team", style="green", style_rule=lambda x: "bold green" if team.upper() in x.upper() else "")
+    signals_table.add_column("Strength", style="blue")
+    signals_table.add_column("Timestamp", style="dim")
+    
+    for row in rows:
+        signals_table.add_row(
+            str(row['id']),
+            f"{row['away_team']} @ {row['home_team']}",
+            row['signal_type'],
+            row['market'],
+            row['team'],
+            row['strength'] or "N/A",
+            row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        )
+    
+    console.print(signals_table)
+    conn.close()
+
+def query_team_history(team, db_path='orderbook_analyzer.db'):
+    """Query historical analysis for a specific team"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT g.game_id, g.event_name, g.home_team, g.away_team, g.start_time,
+           a.timestamp, a.ml_favorite, a.ml_underdog, a.ml_imbalance,
+           a.spread_value, a.spread_favorite, a.spread_underdog, a.spread_imbalance
+    FROM games g
+    JOIN analysis_results a ON g.game_id = a.game_id
+    WHERE g.home_team LIKE ? OR g.away_team LIKE ?
+    ORDER BY a.timestamp DESC
+    """
+    
+    cursor.execute(query, [f'%{team}%', f'%{team}%'])
+    rows = cursor.fetchall()
+    
+    if not rows:
+        console.print(f"[yellow]No games found for team: {team}[/yellow]")
+        return
+    
+    history_table = Table(title=f"Analysis History for {team}")
+    history_table.add_column("Game", style="cyan")
+    history_table.add_column("Time", style="dim")
+    history_table.add_column("ML Favorite", style="green")
+    history_table.add_column("ML Imbalance", style="yellow")
+    history_table.add_column("Spread", style="magenta")
+    history_table.add_column("Spread Favorite", style="blue")
+    history_table.add_column("Spread Imbalance", style="red")
+    
+    for row in rows:
+        game_name = f"{row['away_team']} @ {row['home_team']}"
+        start_time = row['start_time'].split('T')[0] if row['start_time'] else "N/A"
+        analysis_time = row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        
+        history_table.add_row(
+            game_name,
+            f"{start_time}\n{analysis_time}",
+            str(row['ml_favorite'] or "N/A"),
+            f"{row['ml_imbalance']:.2f}" if row['ml_imbalance'] is not None else "N/A",
+            str(row['spread_value'] or "N/A"),
+            str(row['spread_favorite'] or "N/A"),
+            f"{row['spread_imbalance']:.2f}" if row['spread_imbalance'] is not None else "N/A"
+        )
+    
+    console.print(history_table)
+    conn.close()
+
+def query_recent_analysis(days=7, db_path='orderbook_analyzer.db'):
+    """Query recent analysis results"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT a.id, a.timestamp, a.game_id, 
+           a.ml_favorite, a.ml_underdog, a.ml_imbalance,
+           a.spread_value, a.spread_favorite, a.spread_underdog, a.spread_imbalance,
+           a.sharp_signal_count, a.unmatched_signal_count, a.top_book_signal_count,
+           g.home_team, g.away_team, g.event_name
+    FROM analysis_results a
+    JOIN games g ON a.game_id = g.game_id
+    WHERE a.timestamp > datetime('now', ?)
+    ORDER BY a.timestamp DESC
+    """
+    
+    cursor.execute(query, [f'-{days} days'])
+    rows = cursor.fetchall()
+    
+    analysis_table = Table(title=f"Recent Analysis Results (Last {days} days)")
+    analysis_table.add_column("ID", style="dim")
+    analysis_table.add_column("Game", style="cyan")
+    analysis_table.add_column("Time", style="dim")
+    analysis_table.add_column("ML Favorite", style="green")
+    analysis_table.add_column("Spread", style="magenta")
+    analysis_table.add_column("Signal Count", style="yellow")
+    
+    for row in rows:
+        game_name = f"{row['away_team']} @ {row['home_team']}"
+        analysis_time = row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        signal_count = (row['sharp_signal_count'] or 0) + (row['unmatched_signal_count'] or 0) + (row['top_book_signal_count'] or 0)
+        
+        analysis_table.add_row(
+            str(row['id']),
+            game_name,
+            analysis_time,
+            str(row['ml_favorite'] or "N/A"),
+            f"{row['spread_value'] or 'N/A'} ({row['spread_favorite'] or 'N/A'})",
+            str(signal_count)
+        )
+    
+    console.print(analysis_table)
+    conn.close()
+
+def query_most_signaled_teams(db_path='orderbook_analyzer.db'):
+    """Query teams with the most signals"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT team, COUNT(*) as signal_count,
+           SUM(CASE WHEN signal_type = 'sharp' THEN 1 ELSE 0 END) as sharp_count,
+           SUM(CASE WHEN signal_type = 'unmatched_liquidity' THEN 1 ELSE 0 END) as unmatched_count,
+           SUM(CASE WHEN signal_type = 'top_book_imbalance' THEN 1 ELSE 0 END) as imbalance_count
+    FROM signals
+    GROUP BY team
+    ORDER BY signal_count DESC
+    LIMIT 20
+    """
+    
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    
+    team_table = Table(title="Teams with Most Signals")
+    team_table.add_column("Team", style="green")
+    team_table.add_column("Total Signals", style="cyan", justify="right")
+    team_table.add_column("Sharp", style="yellow", justify="right")
+    team_table.add_column("Unmatched", style="magenta", justify="right")
+    team_table.add_column("Imbalance", style="blue", justify="right")
+    
+    for row in rows:
+        team_table.add_row(
+            row['team'],
+            str(row['signal_count']),
+            str(row['sharp_count']),
+            str(row['unmatched_count']),
+            str(row['imbalance_count'])
+        )
+    
+    console.print(team_table)
+    conn.close()
+
+def query_games_with_most_signals(db_path='orderbook_analyzer.db'):
+    """Query games with the most signals, including signal count breakdown by team"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # First query to get games with most signals
+    query = """
+    SELECT s.game_id, g.home_team, g.away_team, g.start_time, g.event_name,
+           COUNT(*) as signal_count,
+           GROUP_CONCAT(DISTINCT s.team) as signaled_teams
+    FROM signals s
+    JOIN games g ON s.game_id = g.game_id
+    GROUP BY s.game_id
+    ORDER BY signal_count DESC
+    LIMIT 15
+    """
+    
+    cursor.execute(query)
+    games = cursor.fetchall()
+    
+    games_table = Table(title="Games with Most Signals")
+    games_table.add_column("Game", style="cyan")
+    games_table.add_column("Date", style="dim")
+    games_table.add_column("Total Signals", style="yellow", justify="right")
+    games_table.add_column("Team Breakdown", style="green")
+    games_table.add_column("Signal Types", style="magenta")
+    
+    for game in games:
+        game_name = f"{game['away_team']} @ {game['home_team']}"
+        game_date = game['start_time'].split('T')[0] if game['start_time'] else "N/A"
+        
+        # Get signal counts by team for this game
+        team_query = """
+        SELECT team, COUNT(*) as team_signals,
+               SUM(CASE WHEN signal_type = 'sharp' THEN 1 ELSE 0 END) as sharp,
+               SUM(CASE WHEN signal_type = 'unmatched_liquidity' THEN 1 ELSE 0 END) as unmatched,
+               SUM(CASE WHEN signal_type = 'top_book_imbalance' THEN 1 ELSE 0 END) as imbalance
+        FROM signals
+        WHERE game_id = ?
+        GROUP BY team
+        ORDER BY team_signals DESC
+        """
+        
+        cursor.execute(team_query, (game['game_id'],))
+        team_counts = cursor.fetchall()
+        
+        # Format team breakdown
+        team_breakdown = []
+        all_signal_types = {"sharp": 0, "unmatched": 0, "imbalance": 0}
+        
+        for tc in team_counts:
+            team_name = tc['team']
+            signal_count = tc['team_signals']
+            team_breakdown.append(f"{team_name}: {signal_count}")
+            
+            # Accumulate signal type counts
+            all_signal_types["sharp"] += tc['sharp'] or 0
+            all_signal_types["unmatched"] += tc['unmatched'] or 0
+            all_signal_types["imbalance"] += tc['imbalance'] or 0
+        
+        team_breakdown_str = ", ".join(team_breakdown)
+        
+        # Format signal types breakdown
+        signal_types = []
+        for sig_type, count in all_signal_types.items():
+            if count > 0:
+                signal_types.append(f"{sig_type}: {count}")
+        
+        signal_types_str = ", ".join(signal_types)
+        
+        games_table.add_row(
+            game_name,
+            game_date,
+            str(game['signal_count']),
+            team_breakdown_str,
+            signal_types_str
+        )
+    
+    console.print(games_table)
+    conn.close()
+
+def query_market_activity_by_day(db_path='orderbook_analyzer.db'):
+    """Query market activity by day"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT date(timestamp) as day,
+           COUNT(DISTINCT game_id) as games_count,
+           COUNT(*) as total_analyses,
+           SUM(sharp_signal_count) as sharp_signals,
+           SUM(unmatched_signal_count) as unmatched_signals,
+           SUM(top_book_signal_count) as topbook_signals
+    FROM analysis_results
+    GROUP BY day
+    ORDER BY day DESC
+    LIMIT 30
+    """
+    
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    
+    activity_table = Table(title="Market Activity by Day")
+    activity_table.add_column("Date", style="cyan")
+    activity_table.add_column("Games", style="yellow", justify="right")
+    activity_table.add_column("Analyses", style="green", justify="right")
+    activity_table.add_column("Sharp Signals", style="magenta", justify="right")
+    activity_table.add_column("Unmatched", style="blue", justify="right")
+    activity_table.add_column("Top Book", style="red", justify="right")
+    
+    for row in rows:
+        activity_table.add_row(
+            row['day'],
+            str(row['games_count']),
+            str(row['total_analyses']),
+            str(row['sharp_signals'] or 0),
+            str(row['unmatched_signals'] or 0),
+            str(row['topbook_signals'] or 0)
+        )
+    
+    console.print(activity_table)
+    conn.close()
+
+def query_signal_trends(db_path='orderbook_analyzer.db'):
+    """Query signal trends over time"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT date(timestamp) as day,
+           signal_type,
+           COUNT(*) as signal_count,
+           COUNT(DISTINCT game_id) as games_count
+    FROM signals
+    GROUP BY day, signal_type
+    ORDER BY day DESC, signal_type
+    LIMIT 50
+    """
+    
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    
+    trend_table = Table(title="Signal Trends Over Time")
+    trend_table.add_column("Date", style="cyan")
+    trend_table.add_column("Signal Type", style="yellow")
+    trend_table.add_column("Signal Count", style="green", justify="right")
+    trend_table.add_column("Games", style="magenta", justify="right")
+    
+    for row in rows:
+        trend_table.add_row(
+            row['day'],
+            row['signal_type'],
+            str(row['signal_count']),
+            str(row['games_count'])
+        )
+    
+    console.print(trend_table)
+    conn.close()
+
+
+
 
 def query_game_history(team, db_path='orderbook_analyzer.db'):
     """Query historical analysis for a specific team"""
@@ -2282,101 +2764,203 @@ def query_game_history(team, db_path='orderbook_analyzer.db'):
     conn.close()
 
 
+def sample_data_menu(db_path):
+    """Menu for viewing sample data from different tables"""
+    console.clear()
+    console.print(Panel("Sample Data Menu", style="bold green"))
+    console.print("1. games table")
+    console.print("2. analysis_results table")
+    console.print("3. signals table")
+    console.print("4. orderbook_snapshots table")
+    console.print("5. orderbook_details table")
+    console.print("6. Back to database inspection menu")
+    console.print("0. Exit")
+    
+    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6"], default="6")
+    
+    if choice == "1":
+        sample_table_data("games", db_path=db_path)
+    elif choice == "2":
+        sample_table_data("analysis_results", db_path=db_path)
+    elif choice == "3":
+        sample_table_data("signals", db_path=db_path)
+    elif choice == "4":
+        sample_table_data("orderbook_snapshots", db_path=db_path)
+    elif choice == "5":
+        sample_table_data("orderbook_details", db_path=db_path)
+    elif choice == "6":
+        return "back"
+    elif choice == "0":
+        return "exit"
+    
+    console.print()
+    input("Press Enter to continue...")
+    return None  # Stay in current menu
+def signals_query_menu(db_path):
+    """Menu for various signal queries"""
+    console.clear()
+    console.print(Panel("Signals Query Menu", style="bold magenta"))
+    console.print("1. Recent signals (last 24 hours)")
+    console.print("2. Signals by time period")
+    console.print("3. Signals by type")
+    console.print("4. Signals by market")
+    console.print("5. Signals by team")
+    console.print("6. Back to database inspection menu")
+    console.print("0. Exit")
+    
+    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6"], default="6")
+    
+    if choice == "1":
+        query_signals(hours=24, db_path=db_path)
+    elif choice == "2":
+        hours = int(Prompt.ask("Hours to look back", default="48"))
+        query_signals(hours=hours, db_path=db_path)
+    elif choice == "3":
+        signal_type = Prompt.ask("Enter signal type (sharp, unmatched_liquidity, top_book_imbalance)", 
+                        choices=["sharp", "unmatched_liquidity", "top_book_imbalance"])
+        query_signals_by_type(signal_type, db_path=db_path)
+    elif choice == "4":
+        market = Prompt.ask("Enter market (Moneyline, Spread)", 
+                   choices=["Moneyline", "Spread"])
+        query_signals_by_market(market, db_path=db_path)
+    elif choice == "5":
+        team = Prompt.ask("Enter team abbreviation (e.g., NYK, LAL)")
+        query_signals_by_team(team, db_path=db_path)
+    elif choice == "6":
+        return "back"
+    elif choice == "0":
+        return "exit"
+    
+    console.print()
+    input("Press Enter to continue...")
+    return None
+
+def advanced_query_menu(db_path):
+    """Menu for advanced database queries"""
+    console.clear()
+    console.print(Panel("Advanced Query Menu", style="bold yellow"))
+    console.print("1. Most signaled teams")
+    console.print("2. Signal success rate by team")
+    console.print("3. Games with most signals")
+    console.print("4. Market activity by day")
+    console.print("5. Signal trends over time")
+    console.print("6. Back to database inspection menu")
+    console.print("0. Exit")
+    
+    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6"], default="6")
+    
+    if choice == "1":
+        query_most_signaled_teams(db_path)
+    elif choice == "2":
+        # This would require adding outcome data to your database
+        console.print("[yellow]Feature not implemented yet. Requires outcome data.[/yellow]")
+    elif choice == "3":
+        query_games_with_most_signals(db_path)
+    elif choice == "4":
+        query_market_activity_by_day(db_path)
+    elif choice == "5":
+        query_signal_trends(db_path)
+    elif choice == "6":
+        return "back"
+    elif choice == "0":
+        return "exit"
+    
+    console.print()
+    input("Press Enter to continue...")
+    return None
+
+def db_inspection_menu(db_path='orderbook_analyzer.db'):
+    """Enhanced database inspection menu with navigation"""
+    console.clear()
+    console.print(Panel("Database Inspection", style="bold blue"))
+    console.print("1. View database structure")
+    console.print("2. Count rows in tables")
+    console.print("3. View sample data from tables")
+    console.print("4. Query signals")
+    console.print("5. Advanced queries")
+    console.print("6. Search team history")
+    console.print("7. View recent analysis results")
+    console.print("8. Return to main menu")
+    console.print("0. Exit")
+    
+    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"], default="8")
+    
+    if choice == "1":
+        inspect_database(db_path)
+        console.print()
+        input("Press Enter to continue...")
+        return None  # Stay in current menu
+    elif choice == "2":
+        count_table_rows(db_path)
+        console.print()
+        input("Press Enter to continue...")
+        return None
+    elif choice == "3":
+        return navigate_menus(sample_data_menu, db_path)
+    elif choice == "4":
+        return navigate_menus(signals_query_menu, db_path)
+    elif choice == "5":
+        return navigate_menus(advanced_query_menu, db_path)
+    elif choice == "6":
+        team = Prompt.ask("Enter team abbreviation (e.g., NYK, LAL)")
+        query_team_history(team, db_path)
+        console.print()
+        input("Press Enter to continue...")
+        return None
+    elif choice == "7":
+        days = int(Prompt.ask("Enter number of days to look back", default="7"))
+        query_recent_analysis(days, db_path)
+        console.print()
+        input("Press Enter to continue...")
+        return None
+    elif choice == "8":
+        return "main"
+    elif choice == "0":
+        return "exit"
+
 def main():
-    """Main execution function"""
+    """Main execution function with improved navigation"""
     db_path = 'orderbook_analyzer.db'
     
-    print("=" * 60)
-    print("ORDERBOOK ANALYZER".center(60))
-    print("=" * 60)
-    print("\n1. Run one-time analysis")
-    print("2. Start continuous monitoring")
-    print("3. View recent signals from database")
-    print("4. Inspect database tables")  # New option
-    print("5. Exit")
-    
-    choice = input("\nEnter your choice (1-4): ")
-    
-    if choice == '1':
-        print("\nRunning one-time analysis...")
-        auth_token = grab_auth_token()
-        orderbook_data = scrape_raw_orderbook(auth_token)
-        analyses, _ = analyze_all_games(orderbook_data, db_path)
-        input("\nPress Enter to continue...")
-        main()
+    while True:
+        console.clear()
+        console.print("=" * 60)
+        console.print("ORDERBOOK ANALYZER".center(60))
+        console.print("=" * 60)
+        console.print("\n1. Run one-time analysis")
+        console.print("2. Start continuous monitoring")
+        console.print("3. View recent signals from database")
+        console.print("4. Inspect database tables")
+        console.print("5. Exit")
         
-    elif choice == '2':
-        print("\nStarting continuous monitoring...")
-        interval = int(input("Enter check interval in minutes (default: 5): ") or "5")
-        duration = int(input("Enter monitoring duration in hours (default: 24): ") or "24")
-        continuous_monitoring(interval_minutes=interval, max_hours=duration, db_path=db_path)
-        main()
+        choice = Prompt.ask("\nEnter your choice", choices=["1", "2", "3", "4", "5"], default="5")
         
-    elif choice == '3':
-        print("\nViewing recent signals...")
-        hours = int(input("How many hours back to look (default: 24): ") or "24")
-        signals = get_recent_signals(hours=hours, db_path=db_path)
-        
-        if signals:
-            signal_table = Table(title=f"Recent Signals (Last {hours} hours)")
-            signal_table.add_column("Game", style="cyan")
-            signal_table.add_column("Type", style="yellow")
-            signal_table.add_column("Market", style="magenta")
-            signal_table.add_column("Team", style="green")
-            signal_table.add_column("Strength", style="blue")
-            signal_table.add_column("Time", style="dim")
+        if choice == "1":
+            console.print("\nRunning one-time analysis...")
+            auth_token = grab_auth_token()
+            orderbook_data = scrape_raw_orderbook(auth_token)
+            analyses, _ = analyze_all_games(orderbook_data, db_path)
+            input("\nPress Enter to continue...")
             
-            for signal in signals:
-                signal_table.add_row(
-                    f"{signal['away_team']} @ {signal['home_team']}",
-                    signal['signal_type'],
-                    signal['market'],
-                    signal['team'],
-                    signal['strength'],
-                    signal['timestamp'].split('T')[1].split('.')[0]  # Format time
-                )
+        elif choice == "2":
+            console.print("\nStarting continuous monitoring...")
+            interval = int(Prompt.ask("Enter check interval in minutes", default="5"))
+            duration = int(Prompt.ask("Enter monitoring duration in hours", default="24"))
+            continuous_monitoring(interval_minutes=interval, max_hours=duration, db_path=db_path)
             
-            console.print(signal_table)
-        else:
-            print("No signals found in the specified time period.")
-        
-        input("\nPress Enter to continue...")
-        main()
-        
-    elif choice == '4':
-        print("\nDatabase inspection:")
-        print("1. View database structure")
-        print("2. Count rows in tables")
-        print("3. View sample data")
-        print("4. Query signals")
-        print("5. Search team history")
-        print("6. Return to main menu")
-        
-        db_choice = input("\nEnter choice (1-6): ")
-        
-        if db_choice == '1':
-            inspect_database(db_path)
-        elif db_choice == '2':
-            count_table_rows(db_path)
-        elif db_choice == '3':
-            table = input("Enter table name: ")
-            sample_table_data(table, db_path=db_path)
-        elif db_choice == '4':
-            hours = int(input("Hours to look back: ") or "24")
-            query_signals(hours, db_path)
-        elif db_choice == '5':
-            team = input("Enter team abbreviation: ")
-            query_game_history(team, db_path)
-        
-        input("\nPress Enter to continue...")
-        main()
-    elif choice == '5':
-        print("\nExiting program...")
-        return
-    
-    else:
-        print("\nInvalid choice. Please try again.")
-        main()
+        elif choice == "3":
+            hours = int(Prompt.ask("How many hours back to look", default="24"))
+            query_signals(hours=hours, db_path=db_path)
+            input("\nPress Enter to continue...")
+            
+        elif choice == "4":
+            # Use navigation system for database inspection
+            navigate_menus(db_inspection_menu, db_path)
+            
+        elif choice == "5":
+            console.print("\nExiting...")
+            break
+
 
 
 
