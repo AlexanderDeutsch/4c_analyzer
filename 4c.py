@@ -3,6 +3,26 @@ import pandas as pd
 import config
 import datetime
 from datetime import datetime
+import json
+import numpy as np
+
+
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, pd.Series):
+            return obj.tolist()
+        elif pd.isna(obj):
+            return None
+        return super(NumpyEncoder, self).default(obj)
+    
+
 
 #Function to grab the auth token
 def grab_auth_token():
@@ -1121,12 +1141,13 @@ def create_dashboard(analyses):
     )
     
     # Create header
+    from datetime import datetime
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = Panel(f"Orderbook Analysis Dashboard - Last Updated: {current_time}", style="bold blue")
     layout["header"].update(header)
     
     # Create signals table
-    signals_table = Table(title="Detected Signals", box=ROUNDED)
+    signals_table = Table(title="Detected Signals", box=ROUNDED, show_lines=True)
     signals_table.add_column("Game", style="cyan", no_wrap=True)
     signals_table.add_column("Signal", style="green")
     signals_table.add_column("Market", style="magenta")
@@ -1135,73 +1156,91 @@ def create_dashboard(analyses):
     
     # Add rows for each signal
     signal_count = 0
+    previous_game = None
+    
     for game_id, analysis in analyses.items():
         game_name = f"{analysis['game_info']['away_team']} @ {analysis['game_info']['home_team']}"
         
-        # Add sharp signals
+        # Track signals by game for grouping
+        game_signals = []
+        
+        # Collect sharp signals
         for signal in analysis.get('sharp_signals', []):
-            signals_table.add_row(
-                game_name,
-                signal['signal'],
-                signal['market'],
-                signal['strength'],
-                "N/A"
-            )
+            game_signals.append({
+                'game': game_name,
+                'signal': signal['signal'],
+                'market': signal['market'],
+                'strength': signal['strength'],
+                'ratio': "N/A"
+            })
             signal_count += 1
         
-        # Add top book imbalances
+        # Collect top book imbalances
         if 'top_book_imbalance' in analysis:
             for signal in analysis['top_book_imbalance'].get('moneyline_signals', []):
-                signals_table.add_row(
-                    game_name,
-                    signal['signal'],
-                    "ML Imbalance",
-                    signal['significance'],
-                    f"{signal['imbalance_ratio']:.2f}x"
-                )
+                game_signals.append({
+                    'game': game_name,
+                    'signal': signal['signal'],
+                    'market': "ML Imbalance",
+                    'strength': signal['significance'],
+                    'ratio': f"{signal['imbalance_ratio']:.2f}x"
+                })
                 signal_count += 1
             
             for signal in analysis['top_book_imbalance'].get('spread_signals', []):
-                signals_table.add_row(
-                    game_name,
-                    signal['signal'],
-                    f"Spread {signal.get('main_spread', '')}",
-                    signal['significance'],
-                    f"{signal['imbalance_ratio']:.2f}x"
-                )
+                game_signals.append({
+                    'game': game_name,
+                    'signal': signal['signal'],
+                    'market': f"Spread {signal.get('main_spread', '')}",
+                    'strength': signal['significance'],
+                    'ratio': f"{signal['imbalance_ratio']:.2f}x"
+                })
                 signal_count += 1
         
-        # Add unmatched liquidity signals
+        # Collect unmatched liquidity signals
         if 'unmatched_liquidity' in analysis:
             for signal in analysis['unmatched_liquidity'].get('moneyline_signals', []):
-                signals_table.add_row(
-                    game_name,
-                    signal.get('signal', 'Unknown'),
-                    "ML Unmatched",
-                    signal.get('significance', 'Unknown'),
-                    "N/A"
-                )
+                game_signals.append({
+                    'game': game_name,
+                    'signal': signal.get('team', 'Unknown'),
+                    'market': "ML Unmatched",
+                    'strength': signal.get('significance', 'Unknown'),
+                    'ratio': "N/A"
+                })
                 signal_count += 1
             
             for signal in analysis['unmatched_liquidity'].get('spread_signals', []):
-                signals_table.add_row(
-                    game_name,
-                    signal.get('signal', 'Unknown'),
-                    f"Spread {signal.get('spread', '')} Unmatched",
-                    signal.get('significance', 'Unknown'),
-                    "N/A"
-                )
+                game_signals.append({
+                    'game': game_name,
+                    'signal': signal.get('team', 'Unknown'),
+                    'market': f"Spread {signal.get('spread', '')} Unmatched",
+                    'strength': signal.get('significance', 'Unknown'),
+                    'ratio': "N/A"
+                })
                 signal_count += 1
+        
+        # Add all signals for this game
+        for i, signal in enumerate(game_signals):
+            signals_table.add_row(
+                signal['game'] if i == 0 else "",  # Only show game name once per game
+                signal['signal'],
+                signal['market'],
+                signal['strength'],
+                signal['ratio']
+            )
+    
     if signal_count == 0:
         signals_table.add_row("No signals detected", "", "", "", "")
     
-    # Create details table with raw orderbook data
-    details = Table(title="Orderbook Details", box=ROUNDED)
+    # Create details table with raw orderbook data - WITH HORIZONTAL LINES
+    details = Table(title="Orderbook Details", box=ROUNDED, show_lines=True)
     details.add_column("Game", style="cyan", no_wrap=True)
     details.add_column("Market", style="yellow")
     details.add_column("Teams", style="green")
     details.add_column("Top Prices", style="magenta")
     details.add_column("Volume by Team", style="blue", justify="right")
+    
+    previous_game = None
     
     for game_id, analysis in analyses.items():
         game_name = f"{analysis['game_info']['away_team']} @ {analysis['game_info']['home_team']}"
@@ -1269,7 +1308,7 @@ def create_dashboard(analyses):
                 volumes_display = f"{fav_team}: ${spread_summary['favorite_top_volume']:.0f}\n{dog_team}: ${spread_summary['underdog_top_volume']:.0f}"
                 
                 details.add_row(
-                    game_name,
+                    "",  # Leave game name blank to group with the moneyline row
                     f"Spread {spread_data.get('main_spread', '')}",
                     f"{fav_team} (Fav) vs\n{dog_team} (Dog)",
                     prices_display,
@@ -1655,109 +1694,206 @@ def save_orderbook_details(snapshot_id, timestamp, all_games_df, db_path='orderb
         conn.close()
 
 def save_analysis_results(timestamp, all_analyses, db_path='orderbook_analyzer.db'):
-    """Save analysis results with proper field extraction"""
+    
+    if not timestamp:
+        timestamp = datetime.now().isoformat()
+        
+    print(f"Saving analysis results to database. Timestamp: {timestamp}")
+    print(f"Number of analyses to save: {len(all_analyses)}")
+    
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     
-    for game_id, analysis in all_analyses.items():
-        # Extract key data
-        ml_data = analysis.get('moneyline', {})
-        spread_data = analysis.get('spread', {})
-        
-        # Insert analysis result
-        c.execute('''
-        INSERT INTO analysis_results (
-            timestamp, game_id, 
-            ml_favorite, ml_underdog, ml_favorite_best_odds, ml_underdog_best_odds, ml_imbalance,
-            spread_value, spread_favorite, spread_underdog, spread_imbalance,
-            matched_liquidity_pct, matched_liquidity_count,
-            sharp_signal_count, unmatched_signal_count, top_book_signal_count,
-            analysis_data
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            timestamp,
-            game_id,
-            ml_data.get('favorite_team'),
-            ml_data.get('underdog_team'),
-            ml_data.get('favorite_best_odds'),
-            ml_data.get('underdog_best_odds'),
-            ml_data.get('imbalance'),
-            spread_data.get('main_spread'),
-            spread_data.get('favorite_team'),
-            spread_data.get('underdog_team'),
-            spread_data.get('imbalance'),
-            analysis.get('matched_liquidity_percentage'),
-            analysis.get('matched_liquidity_count'),
-            len(analysis.get('sharp_signals', [])),
-            analysis.get('unmatched_liquidity', {}).get('total_signals', 0),
-            analysis.get('top_book_imbalance', {}).get('total_signals', 0),
-            json.dumps(analysis)
-        ))
-        
-        analysis_id = c.lastrowid
-        
-        # Save each individual signal
-        # Sharp signals
-        for signal in analysis.get('sharp_signals', []):
+    try:
+        c.execute("BEGIN TRANSACTION")
+        saved_count = 0
+        signals_count = 0
+
+        for game_id, analysis in all_analyses.items():
+            # Extract key data
+            ml_data = analysis.get('moneyline', {})
+            spread_data = analysis.get('spread', {})
+            
+            print(f"Processing game_id: {game_id}")
+            print(f"ML favorite: {ml_data.get('favorite_team')}")
+            print(f"Spread value: {spread_data.get('main_spread')}")
+            
+            # Ensure we have valid types for all fields that might be None
+            ml_favorite = ml_data.get('favorite_team') or None
+            ml_underdog = ml_data.get('underdog_team') or None
+            ml_favorite_odds = ml_data.get('favorite_best_odds') or None
+            ml_underdog_odds = ml_data.get('underdog_best_odds') or None
+            ml_imbalance = ml_data.get('imbalance') or 0.0
+            
+            spread_value = spread_data.get('main_spread') or None
+            spread_favorite = spread_data.get('favorite_team') or None
+            spread_underdog = spread_data.get('underdog_team') or None
+            spread_imbalance = spread_data.get('imbalance') or 0.0
+            
+            matched_pct = analysis.get('matched_liquidity_percentage') or 0.0
+            matched_count = analysis.get('matched_liquidity_count') or 0
+            
+            sharp_count = len(analysis.get('sharp_signals', []))
+            unmatched_count = analysis.get('unmatched_liquidity', {}).get('total_signals', 0)
+            top_book_count = analysis.get('top_book_imbalance', {}).get('total_signals', 0)
+            
+            # Convert entire analysis to JSON for storage - USE THE CUSTOM ENCODER
+            analysis_json = json.dumps(analysis, cls=NumpyEncoder)
+            
+            # Insert analysis result
             c.execute('''
-            INSERT INTO signals (
-                analysis_id, game_id, timestamp, signal_type, market, team, 
-                strength, imbalance_ratio, signal_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO analysis_results (
+                timestamp, game_id, 
+                ml_favorite, ml_underdog, ml_favorite_best_odds, ml_underdog_best_odds, ml_imbalance,
+                spread_value, spread_favorite, spread_underdog, spread_imbalance,
+                matched_liquidity_pct, matched_liquidity_count,
+                sharp_signal_count, unmatched_signal_count, top_book_signal_count,
+                analysis_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                analysis_id,
-                game_id,
                 timestamp,
-                'sharp',
-                signal.get('market'),
-                signal.get('signal'),
-                signal.get('strength'),
-                0.0,  # Sharp signals don't have ratio
-                json.dumps(signal)
+                game_id,
+                ml_favorite,
+                ml_underdog,
+                ml_favorite_odds,
+                ml_underdog_odds,
+                ml_imbalance,
+                spread_value,
+                spread_favorite,
+                spread_underdog,
+                spread_imbalance,
+                matched_pct,
+                matched_count,
+                sharp_count,
+                unmatched_count,
+                top_book_count,
+                analysis_json
             ))
+            
+            analysis_id = c.lastrowid
+            saved_count += 1
+            
+            if analysis_id:
+                print(f"Saved analysis ID: {analysis_id}")
+                
+                # Save each individual signal - USING THE CUSTOM ENCODER
+                # Sharp signals
+                for signal in analysis.get('sharp_signals', []):
+                    c.execute('''
+                    INSERT INTO signals (
+                        analysis_id, game_id, timestamp, signal_type, market, team, 
+                        strength, imbalance_ratio, signal_data
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        analysis_id,
+                        game_id,
+                        timestamp,
+                        'sharp',
+                        signal.get('market', ''),
+                        signal.get('signal', ''),
+                        signal.get('strength', ''),
+                        0.0,  # Sharp signals don't have ratio
+                        json.dumps(signal, cls=NumpyEncoder)
+                    ))
+                    signals_count += 1
+                
+                # Unmatched liquidity signals
+                for market in ['moneyline_signals', 'spread_signals']:
+                    for signal in analysis.get('unmatched_liquidity', {}).get(market, []):
+                        c.execute('''
+                        INSERT INTO signals (
+                            analysis_id, game_id, timestamp, signal_type, market, team, 
+                            strength, imbalance_ratio, signal_data
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            analysis_id,
+                            game_id,
+                            timestamp,
+                            'unmatched_liquidity',
+                            'Moneyline' if market == 'moneyline_signals' else 'Spread',
+                            signal.get('team', ''),
+                            signal.get('significance', ''),
+                            0.0,  # Unmatched doesn't have ratio
+                            json.dumps(signal, cls=NumpyEncoder)
+                        ))
+                        signals_count += 1
+                
+                # Top book imbalance signals
+                for market in ['moneyline_signals', 'spread_signals']:
+                    for signal in analysis.get('top_book_imbalance', {}).get(market, []):
+                        c.execute('''
+                        INSERT INTO signals (
+                            analysis_id, game_id, timestamp, signal_type, market, team, 
+                            strength, imbalance_ratio, signal_data
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            analysis_id,
+                            game_id,
+                            timestamp,
+                            'top_book_imbalance',
+                            'Moneyline' if market == 'moneyline_signals' else 'Spread',
+                            signal.get('signal', ''),
+                            signal.get('significance', ''),
+                            signal.get('imbalance_ratio', 0.0),
+                            json.dumps(signal, cls=NumpyEncoder)
+                        ))
+                        signals_count += 1
         
-        # Unmatched liquidity signals
-        for market in ['moneyline_signals', 'spread_signals']:
-            for signal in analysis.get('unmatched_liquidity', {}).get(market, []):
-                c.execute('''
-                INSERT INTO signals (
-                    analysis_id, game_id, timestamp, signal_type, market, team, 
-                    strength, imbalance_ratio, signal_data
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    analysis_id,
-                    game_id,
-                    timestamp,
-                    'unmatched_liquidity',
-                    'Moneyline' if market == 'moneyline_signals' else 'Spread',
-                    signal.get('team'),
-                    signal.get('significance'),
-                    0.0,  # Unmatched doesn't have ratio
-                    json.dumps(signal)
-                ))
-        
-        # Top book imbalance signals
-        for market in ['moneyline_signals', 'spread_signals']:
-            for signal in analysis.get('top_book_imbalance', {}).get(market, []):
-                c.execute('''
-                INSERT INTO signals (
-                    analysis_id, game_id, timestamp, signal_type, market, team, 
-                    strength, imbalance_ratio, signal_data
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    analysis_id,
-                    game_id,
-                    timestamp,
-                    'top_book_imbalance',
-                    'Moneyline' if market == 'moneyline_signals' else 'Spread',
-                    signal.get('signal'),
-                    signal.get('significance'),
-                    signal.get('imbalance_ratio', 0.0),
-                    json.dumps(signal)
-                ))
+        c.execute("COMMIT")
+        print(f"Successfully saved {saved_count} analyses and {signals_count} signals to database")
     
-    conn.commit()
-    conn.close()
+    except Exception as e:
+        c.execute("ROLLBACK")
+        print(f"Error saving analysis results: {str(e)}")
+        import traceback
+        traceback.print_exc()  # Print the full stack trace
+    
+    finally:
+        conn.close()
+# Debugging function to check database before saving
+def check_db_before_save(db_path='orderbook_analyzer.db'):
+    """Check if database tables are properly set up"""
+    import sqlite3
+    
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    
+    try:
+        # Check if analysis_results table exists
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_results'")
+        has_analysis_table = c.fetchone() is not None
+        
+        # Check if signals table exists
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
+        has_signals_table = c.fetchone() is not None
+        
+        # Get column info if tables exist
+        analysis_cols = []
+        signals_cols = []
+        
+        if has_analysis_table:
+            c.execute("PRAGMA table_info(analysis_results)")
+            analysis_cols = [row[1] for row in c.fetchall()]
+            
+        if has_signals_table:
+            c.execute("PRAGMA table_info(signals)")
+            signals_cols = [row[1] for row in c.fetchall()]
+        
+        print("Database status:")
+        print(f"- analysis_results table exists: {has_analysis_table}")
+        print(f"- signals table exists: {has_signals_table}")
+        print(f"- analysis_results columns: {', '.join(analysis_cols)}")
+        print(f"- signals columns: {', '.join(signals_cols)}")
+        
+        return has_analysis_table and has_signals_table
+    
+    except Exception as e:
+        print(f"Error checking database: {str(e)}")
+        return False
+    
+    finally:
+        conn.close()
+
 
 def get_recent_signals(hours=24, signal_type=None, market=None, db_path='orderbook_analyzer.db'):
     """Get recent signals of specified type and market"""
@@ -1815,27 +1951,33 @@ def live_dashboard(analyze_func, interval_seconds=300):
 
 def analyze_all_games(orderbook_data, db_path='orderbook_analyzer.db'):
     """Analyze all games in the orderbook and detect sharp signals"""
+    from datetime import datetime
+    
     # Process the full orderbook
     ensure_database_initialized(db_path)
+    
+    # Verify database tables exist
+    check_db_before_save(db_path)
+    
     snapshot_id, timestamp = save_orderbook_snapshot(orderbook_data, db_path)
-
     all_games_df, all_games_info = process_full_orderbook(orderbook_data)
     save_game_data(all_games_info, db_path)
+    
     # Add a column for matched liquidity to the full dataset
     all_games_df['matched_liquidity'] = False
 
-    #For each game, identify matched liquidity for each bet type
+    # For each game, identify matched liquidity for each bet type
     for game_id in all_games_df['GameID'].unique():
         game_df = all_games_df[all_games_df['GameID'] == game_id]
         matched_liquidity = identify_matched_liquidity(game_df, threshold=50)
         all_games_df.loc[all_games_df['GameID'] == game_id, 'matched_liquidity'] = matched_liquidity['matched_liquidity']
 
-
-
+    # Save orderbook details
     save_orderbook_details(snapshot_id, timestamp, all_games_df, db_path)
+    
     # Save the full dataset with matched liquidity identified
-    #now = datetime.datetime.now().strftime('%Y_%m_%d_%I%M%p')
-    #all_games_df.to_csv(f'all_games_orderbook_with_matches_{now}.csv', index=False)
+    now = datetime.now().strftime('%Y_%m_%d_%I%M%p')
+    all_games_df.to_csv(f'all_games_orderbook_with_matches_{now}.csv', index=False)
     
     # Dictionary to store all analyses
     all_analyses = {}
@@ -1869,19 +2011,26 @@ def analyze_all_games(orderbook_data, db_path='orderbook_analyzer.db'):
         game_analysis['sharp_signals'] = detect_sharp_signals(ml_analysis, spread_analysis)
         game_analysis['signal_count'] = len(game_analysis['sharp_signals'])
 
-
-        # In analyze_all_games function
+        # Add other analysis
         game_analysis['unmatched_liquidity'] = analyze_unmatched_liquidity(game_analysis, game_df)
         game_analysis['top_book_imbalance'] = detect_top_book_imbalance(game_analysis, game_df)
+        
         # Store analysis
         all_analyses[game_id] = game_analysis
         
         # Print results
         print(f"\n{game_info['event_name']} ({game_info['away_team']} @ {game_info['home_team']})")
         print("-------------------------------------------")
-        #print_analysis_results(game_analysis)
-        display_dashboard(all_analyses) 
-        
+    
+    # Save analysis results to database with detailed debug logging
+    try:
+        print("Saving analysis results to database...")
+        save_analysis_results(timestamp, all_analyses, db_path)
+        print("Analysis results saved successfully")
+    except Exception as e:
+        print(f"Error saving analysis results: {str(e)}")
+    
+    display_dashboard(all_analyses) 
     
     return all_analyses, all_games_df
 
@@ -1941,7 +2090,196 @@ def continuous_monitoring(interval_minutes=5, max_hours=24, db_path='orderbook_a
     print(f"Monitoring complete. Ran from {start_time} to {datetime.now()}")
     print(f"All data saved to {db_path}")
 
+def inspect_database(db_path='orderbook_analyzer.db'):
+    """List all tables in the database and show their structure"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Get list of all tables
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cursor.fetchall()
+    
+    table_info = Table(title=f"Database Structure: {db_path}")
+    table_info.add_column("Table Name", style="cyan")
+    table_info.add_column("Column Name", style="yellow")
+    table_info.add_column("Type", style="green")
+    
+    for table_name in tables:
+        table_name = table_name[0]
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = cursor.fetchall()
+        
+        for i, col in enumerate(columns):
+            table_info.add_row(
+                table_name if i == 0 else "",
+                col[1],  # Column name
+                col[2]   # Data type
+            )
+    
+    console.print(table_info)
+    conn.close()
 
+def count_table_rows(db_path='orderbook_analyzer.db'):
+    """Count the number of rows in each table"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Get list of all tables
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cursor.fetchall()
+    
+    count_table = Table(title="Row Counts by Table")
+    count_table.add_column("Table Name", style="cyan")
+    count_table.add_column("Row Count", style="yellow", justify="right")
+    
+    for table in tables:
+        table_name = table[0]
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        row_count = cursor.fetchone()[0]
+        count_table.add_row(table_name, str(row_count))
+    
+    console.print(count_table)
+    conn.close()
+
+def sample_table_data(table_name, limit=5, db_path='orderbook_analyzer.db'):
+    """Print a sample of rows from a specific table"""
+    conn = sqlite3.connect(db_path)
+    
+    try:
+        # Read data into DataFrame for easy display
+        df = pd.read_sql_query(f"SELECT * FROM {table_name} LIMIT {limit}", conn)
+        
+        if len(df) == 0:
+            console.print(f"[yellow]No data found in table: {table_name}[/yellow]")
+            return
+        
+        # Expand any JSON columns
+        json_cols = []
+        for col in df.columns:
+            # Try to parse the first non-null value as JSON
+            sample = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+            if isinstance(sample, str) and sample.startswith('{') and sample.endswith('}'):
+                try:
+                    json.loads(sample)
+                    json_cols.append(col)
+                except:
+                    pass
+        
+        # Print basic table info
+        console.print(f"[bold cyan]Sample data from table: {table_name}[/bold cyan]")
+        console.print(f"Columns: {', '.join(df.columns.tolist())}")
+        console.print(f"Rows displayed: {len(df)} of {limit} requested")
+        
+        # Print DataFrame
+        console.print("\n[bold]Data sample:[/bold]")
+        console.print(df)
+        
+        # Pretty print any JSON columns
+        for col in json_cols:
+            console.print(f"\n[bold]Contents of JSON column: {col}[/bold]")
+            sample_row = df.iloc[0]
+            json_data = json.loads(sample_row[col])
+            console.print(json.dumps(json_data, indent=2))
+    
+    except Exception as e:
+        console.print(f"[bold red]Error inspecting table {table_name}: {str(e)}[/bold red]")
+    
+    finally:
+        conn.close()
+
+def query_signals(hours=24, db_path='orderbook_analyzer.db'):
+    """Query recent signals from the database"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT s.id, s.game_id, s.timestamp, s.signal_type, s.market, s.team, 
+           s.strength, s.imbalance_ratio, 
+           g.home_team, g.away_team, g.event_name
+    FROM signals s
+    JOIN games g ON s.game_id = g.game_id
+    WHERE s.timestamp > datetime('now', ?)
+    ORDER BY s.timestamp DESC
+    """
+    
+    cursor.execute(query, [f'-{hours} hours'])
+    rows = cursor.fetchall()
+    
+    signals_table = Table(title=f"Recent Signals (Last {hours} hours)")
+    signals_table.add_column("ID", style="dim")
+    signals_table.add_column("Game", style="cyan")
+    signals_table.add_column("Signal Type", style="yellow")
+    signals_table.add_column("Market", style="magenta")
+    signals_table.add_column("Team", style="green")
+    signals_table.add_column("Strength", style="blue")
+    signals_table.add_column("Ratio", style="red")
+    signals_table.add_column("Timestamp", style="dim")
+    
+    for row in rows:
+        signals_table.add_row(
+            str(row['id']),
+            f"{row['away_team']} @ {row['home_team']}",
+            row['signal_type'],
+            row['market'],
+            row['team'],
+            row['strength'] or "N/A",
+            f"{row['imbalance_ratio']:.2f}x" if row['imbalance_ratio'] > 0 else "N/A",
+            row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        )
+    
+    console.print(signals_table)
+    conn.close()
+
+def query_game_history(team, db_path='orderbook_analyzer.db'):
+    """Query historical analysis for a specific team"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = """
+    SELECT g.game_id, g.event_name, g.home_team, g.away_team, g.start_time,
+           a.timestamp, a.ml_favorite, a.ml_underdog, a.ml_imbalance,
+           a.spread_value, a.spread_favorite, a.spread_underdog, a.spread_imbalance
+    FROM games g
+    JOIN analysis_results a ON g.game_id = a.game_id
+    WHERE g.home_team LIKE ? OR g.away_team LIKE ?
+    ORDER BY a.timestamp DESC
+    """
+    
+    cursor.execute(query, [f'%{team}%', f'%{team}%'])
+    rows = cursor.fetchall()
+    
+    if not rows:
+        console.print(f"[yellow]No games found for team: {team}[/yellow]")
+        return
+    
+    history_table = Table(title=f"Analysis History for {team}")
+    history_table.add_column("Game", style="cyan")
+    history_table.add_column("Time", style="dim")
+    history_table.add_column("ML Favorite", style="green")
+    history_table.add_column("ML Imbalance", style="yellow")
+    history_table.add_column("Spread", style="magenta")
+    history_table.add_column("Spread Favorite", style="blue")
+    history_table.add_column("Spread Imbalance", style="red")
+    
+    for row in rows:
+        game_name = f"{row['away_team']} @ {row['home_team']}"
+        start_time = row['start_time'].split('T')[0] if row['start_time'] else "N/A"
+        analysis_time = row['timestamp'].split('T')[0] + " " + row['timestamp'].split('T')[1][:8]
+        
+        history_table.add_row(
+            game_name,
+            f"{start_time}\n{analysis_time}",
+            str(row['ml_favorite'] or "N/A"),
+            f"{row['ml_imbalance']:.2f}" if row['ml_imbalance'] is not None else "N/A",
+            str(row['spread_value'] or "N/A"),
+            str(row['spread_favorite'] or "N/A"),
+            f"{row['spread_imbalance']:.2f}" if row['spread_imbalance'] is not None else "N/A"
+        )
+    
+    console.print(history_table)
+    conn.close()
 
 
 def main():
@@ -1954,7 +2292,8 @@ def main():
     print("\n1. Run one-time analysis")
     print("2. Start continuous monitoring")
     print("3. View recent signals from database")
-    print("4. Exit")
+    print("4. Inspect database tables")  # New option
+    print("5. Exit")
     
     choice = input("\nEnter your choice (1-4): ")
     
@@ -2005,12 +2344,41 @@ def main():
         main()
         
     elif choice == '4':
-        print("\nExiting...")
+        print("\nDatabase inspection:")
+        print("1. View database structure")
+        print("2. Count rows in tables")
+        print("3. View sample data")
+        print("4. Query signals")
+        print("5. Search team history")
+        print("6. Return to main menu")
+        
+        db_choice = input("\nEnter choice (1-6): ")
+        
+        if db_choice == '1':
+            inspect_database(db_path)
+        elif db_choice == '2':
+            count_table_rows(db_path)
+        elif db_choice == '3':
+            table = input("Enter table name: ")
+            sample_table_data(table, db_path=db_path)
+        elif db_choice == '4':
+            hours = int(input("Hours to look back: ") or "24")
+            query_signals(hours, db_path)
+        elif db_choice == '5':
+            team = input("Enter team abbreviation: ")
+            query_game_history(team, db_path)
+        
+        input("\nPress Enter to continue...")
+        main()
+    elif choice == '5':
+        print("\nExiting program...")
         return
     
     else:
         print("\nInvalid choice. Please try again.")
         main()
+
+
 
 
 if __name__ == "__main__":
