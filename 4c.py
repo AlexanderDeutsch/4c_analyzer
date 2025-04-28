@@ -16,7 +16,11 @@ import time
 from rich.prompt import Prompt
 
 class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder that can handle NumPy and pandas-specific types"""
     def default(self, obj):
+        import numpy as np
+        import pandas as pd
+        
         if isinstance(obj, (np.integer, np.int64)):
             return int(obj)
         elif isinstance(obj, (np.floating, np.float64)):
@@ -29,7 +33,6 @@ class NumpyEncoder(json.JSONEncoder):
             return None
         return super(NumpyEncoder, self).default(obj)
     
-
 
 #Function to grab the auth token
 def grab_auth_token():
@@ -2048,6 +2051,10 @@ def analyze_all_games(orderbook_data, db_path='orderbook_analyzer.db'):
         print("Analysis results saved successfully")
     except Exception as e:
         print(f"Error saving analysis results: {str(e)}")
+    try:
+        track_signals(all_analyses, db_path)
+    except Exception as e:
+        print(f"Error tracking signals: {str(e)}")
     
     display_dashboard(all_analyses) 
     
@@ -2509,18 +2516,40 @@ def query_recent_analysis(days=7, db_path='orderbook_analyzer.db'):
     console.print(analysis_table)
     conn.close()
 
-def query_most_signaled_teams(db_path='orderbook_analyzer.db'):
-    """Query teams with the most signals"""
+def query_most_signaled_teams(db_path='orderbook_analyzer.db', today_only=True):
+    """
+    Query teams with the most signals, with option to filter for today only
+    
+    Parameters:
+    db_path (str): Path to database file
+    today_only (bool): If True, only include signals from today
+    """
+    from rich.console import Console
+    from rich.table import Table
+    import sqlite3
+    from datetime import date
+    
+    console = Console()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
+    # Base query
     query = """
     SELECT team, COUNT(*) as signal_count,
            SUM(CASE WHEN signal_type = 'sharp' THEN 1 ELSE 0 END) as sharp_count,
            SUM(CASE WHEN signal_type = 'unmatched_liquidity' THEN 1 ELSE 0 END) as unmatched_count,
            SUM(CASE WHEN signal_type = 'top_book_imbalance' THEN 1 ELSE 0 END) as imbalance_count
     FROM signals
+    """
+    
+    # Add today filter if requested
+    if today_only:
+        today = date.today().isoformat()
+        query += f" WHERE date(timestamp) = '{today}'"
+    
+    # Complete the query
+    query += """
     GROUP BY team
     ORDER BY signal_count DESC
     LIMIT 20
@@ -2529,7 +2558,12 @@ def query_most_signaled_teams(db_path='orderbook_analyzer.db'):
     cursor.execute(query)
     rows = cursor.fetchall()
     
-    team_table = Table(title="Teams with Most Signals")
+    # Create title with date information
+    title = "Teams with Most Signals"
+    if today_only:
+        title += f" (Today: {date.today().strftime('%Y-%m-%d')})"
+    
+    team_table = Table(title=title)
     team_table.add_column("Team", style="green")
     team_table.add_column("Total Signals", style="cyan", justify="right")
     team_table.add_column("Sharp", style="yellow", justify="right")
@@ -2548,87 +2582,116 @@ def query_most_signaled_teams(db_path='orderbook_analyzer.db'):
     console.print(team_table)
     conn.close()
 
-def query_games_with_most_signals(db_path='orderbook_analyzer.db'):
-    """Query games with the most signals, including signal count breakdown by team"""
+    
+def query_games_with_most_signals(db_path='orderbook_analyzer.db', today_only=True):
+    """
+    Query games with the most signals, with option to filter for today only
+    
+    Parameters:
+    db_path (str): Path to database file
+    today_only (bool): If True, only include signals from today
+    """
+    from rich.console import Console
+    from rich.table import Table
+    import sqlite3
+    from datetime import date
+    
+    console = Console()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # First query to get games with most signals
+    # Base query
     query = """
     SELECT s.game_id, g.home_team, g.away_team, g.start_time, g.event_name,
            COUNT(*) as signal_count,
            GROUP_CONCAT(DISTINCT s.team) as signaled_teams
     FROM signals s
     JOIN games g ON s.game_id = g.game_id
+    """
+    
+    # Add today filter if requested
+    if today_only:
+        today = date.today().isoformat()
+        query += f" WHERE date(s.timestamp) = '{today}'"
+    
+    # Complete the query
+    query += """
     GROUP BY s.game_id
     ORDER BY signal_count DESC
     LIMIT 15
     """
     
     cursor.execute(query)
-    games = cursor.fetchall()
+    rows = cursor.fetchall()
     
-    games_table = Table(title="Games with Most Signals")
+    # Create title with date information
+    title = "Games with Most Signals"
+    if today_only:
+        title += f" (Today: {date.today().strftime('%Y-%m-%d')})"
+    
+    games_table = Table(title=title)
     games_table.add_column("Game", style="cyan")
     games_table.add_column("Date", style="dim")
-    games_table.add_column("Total Signals", style="yellow", justify="right")
-    games_table.add_column("Team Breakdown", style="green")
-    games_table.add_column("Signal Types", style="magenta")
+    games_table.add_column("Signal Count", style="yellow", justify="right")
+    games_table.add_column("Signaled Teams", style="green")
     
-    for game in games:
-        game_name = f"{game['away_team']} @ {game['home_team']}"
-        game_date = game['start_time'].split('T')[0] if game['start_time'] else "N/A"
-        
-        # Get signal counts by team for this game
-        team_query = """
-        SELECT team, COUNT(*) as team_signals,
-               SUM(CASE WHEN signal_type = 'sharp' THEN 1 ELSE 0 END) as sharp,
-               SUM(CASE WHEN signal_type = 'unmatched_liquidity' THEN 1 ELSE 0 END) as unmatched,
-               SUM(CASE WHEN signal_type = 'top_book_imbalance' THEN 1 ELSE 0 END) as imbalance
-        FROM signals
-        WHERE game_id = ?
-        GROUP BY team
-        ORDER BY team_signals DESC
-        """
-        
-        cursor.execute(team_query, (game['game_id'],))
-        team_counts = cursor.fetchall()
-        
-        # Format team breakdown
-        team_breakdown = []
-        all_signal_types = {"sharp": 0, "unmatched": 0, "imbalance": 0}
-        
-        for tc in team_counts:
-            team_name = tc['team']
-            signal_count = tc['team_signals']
-            team_breakdown.append(f"{team_name}: {signal_count}")
-            
-            # Accumulate signal type counts
-            all_signal_types["sharp"] += tc['sharp'] or 0
-            all_signal_types["unmatched"] += tc['unmatched'] or 0
-            all_signal_types["imbalance"] += tc['imbalance'] or 0
-        
-        team_breakdown_str = ", ".join(team_breakdown)
-        
-        # Format signal types breakdown
-        signal_types = []
-        for sig_type, count in all_signal_types.items():
-            if count > 0:
-                signal_types.append(f"{sig_type}: {count}")
-        
-        signal_types_str = ", ".join(signal_types)
+    for row in rows:
+        game_name = f"{row['away_team']} @ {row['home_team']}"
+        game_date = row['start_time'].split('T')[0] if row['start_time'] else "N/A"
         
         games_table.add_row(
             game_name,
             game_date,
-            str(game['signal_count']),
-            team_breakdown_str,
-            signal_types_str
+            str(row['signal_count']),
+            row['signaled_teams']
         )
     
     console.print(games_table)
+    
+    # If we're doing today only, also get the team breakdown
+    if today_only and rows:
+        # For each game, get signal counts by team
+        for row in rows:  # Only do the top 5 to avoid too much output
+            game_id = row['game_id']
+            game_name = f"{row['away_team']} @ {row['home_team']}"
+            
+            team_query = """
+            SELECT team, COUNT(*) as team_signals,
+                   SUM(CASE WHEN signal_type = 'sharp' THEN 1 ELSE 0 END) as sharp,
+                   SUM(CASE WHEN signal_type = 'unmatched_liquidity' THEN 1 ELSE 0 END) as unmatched,
+                   SUM(CASE WHEN signal_type = 'top_book_imbalance' THEN 1 ELSE 0 END) as imbalance
+            FROM signals
+            WHERE game_id = ? AND date(timestamp) = ?
+            GROUP BY team
+            ORDER BY team_signals DESC
+            """
+            
+            cursor.execute(team_query, (game_id, today))
+            team_rows = cursor.fetchall()
+            
+            if team_rows:
+                team_table = Table(title=f"Signal Breakdown for {game_name}")
+                team_table.add_column("Team", style="green")
+                team_table.add_column("Total", style="cyan", justify="right")
+                team_table.add_column("Sharp", style="yellow", justify="right")
+                team_table.add_column("Unmatched", style="magenta", justify="right")
+                team_table.add_column("Imbalance", style="blue", justify="right")
+                
+                for team_row in team_rows:
+                    team_table.add_row(
+                        team_row['team'],
+                        str(team_row['team_signals']),
+                        str(team_row['sharp']),
+                        str(team_row['unmatched']),
+                        str(team_row['imbalance'])
+                    )
+                
+                console.print(team_table)
+                console.print()
+    
     conn.close()
+
 
 def query_market_activity_by_day(db_path='orderbook_analyzer.db'):
     """Query market activity by day"""
@@ -2762,6 +2825,84 @@ def query_game_history(team, db_path='orderbook_analyzer.db'):
     
     console.print(history_table)
     conn.close()
+def view_signal_instances(db_path='orderbook_analyzer.db'):
+    """Display records from the signal_instances table"""
+    from rich.console import Console
+    from rich.table import Table
+    import sqlite3
+    
+    console = Console()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Query signal_instances table
+    cursor.execute("""
+    SELECT id, game_id, team, signal_type, market, first_seen, last_seen, 
+           occurrence_count, strength, is_active
+    FROM signal_instances
+    ORDER BY id DESC
+    LIMIT 20
+    """)
+    
+    rows = cursor.fetchall()
+    
+    if not rows:
+        console.print("[yellow]No records found in signal_instances table[/yellow]")
+        conn.close()
+        return
+    
+    table = Table(title="Records from signal_instances Table")
+    table.add_column("ID", style="dim")
+    table.add_column("Game ID", style="dim", max_width=15)
+    table.add_column("Team", style="green")
+    table.add_column("Type", style="yellow")
+    table.add_column("Market", style="magenta")
+    table.add_column("Count", style="cyan", justify="right")
+    table.add_column("First Seen", style="dim")
+    table.add_column("Last Seen", style="dim")
+    table.add_column("Active", style="blue")
+    
+    for row in rows:
+        table.add_row(
+            str(row['id']),
+            row['game_id'][:12] + "...",
+            row['team'],
+            row['signal_type'],
+            row['market'] or "None",
+            str(row['occurrence_count']),
+            row['first_seen'].split('T')[1][:8] if row['first_seen'] else "N/A",
+            row['last_seen'].split('T')[1][:8] if row['last_seen'] else "N/A",
+            "Yes" if row['is_active'] else "No"
+        )
+    
+    console.print(table)
+    
+    # Count by market
+    cursor.execute("""
+    SELECT market, COUNT(*) as count
+    FROM signal_instances
+    GROUP BY market
+    ORDER BY count DESC
+    """)
+    
+    market_counts = cursor.fetchall()
+    
+    market_table = Table(title="Market Distribution")
+    market_table.add_column("Market", style="magenta")
+    market_table.add_column("Count", style="cyan", justify="right")
+    
+    for row in market_counts:
+        market_table.add_row(
+            row['market'] or "None",
+            str(row['count'])
+        )
+    
+    console.print(market_table)
+    
+    conn.close()
+
+
 
 
 def sample_data_menu(db_path):
@@ -2774,9 +2915,10 @@ def sample_data_menu(db_path):
     console.print("4. orderbook_snapshots table")
     console.print("5. orderbook_details table")
     console.print("6. Back to database inspection menu")
+    console.print("8. Signal Instances")
     console.print("0. Exit")
     
-    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6"], default="6")
+    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6","8"], default="6")
     
     if choice == "1":
         sample_table_data("games", db_path=db_path)
@@ -2790,6 +2932,8 @@ def sample_data_menu(db_path):
         sample_table_data("orderbook_details", db_path=db_path)
     elif choice == "6":
         return "back"
+    elif choice == "8":
+        view_signal_instances(db_path)
     elif choice == "0":
         return "exit"
     
@@ -2839,9 +2983,9 @@ def advanced_query_menu(db_path):
     """Menu for advanced database queries"""
     console.clear()
     console.print(Panel("Advanced Query Menu", style="bold yellow"))
-    console.print("1. Most signaled teams")
+    console.print("1. Most signaled teams(today only)")
     console.print("2. Signal success rate by team")
-    console.print("3. Games with most signals")
+    console.print("3. Games with most signals(today only)")
     console.print("4. Market activity by day")
     console.print("5. Signal trends over time")
     console.print("6. Back to database inspection menu")
@@ -2869,6 +3013,37 @@ def advanced_query_menu(db_path):
     input("Press Enter to continue...")
     return None
 
+def fix_existing_unknown_markets(db_path='orderbook_analyzer.db'):
+    """Fix existing Unknown markets in the signal_instances table"""
+    from rich.console import Console
+    console = Console()
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    try:
+        # Get count of Unknown markets
+        cursor.execute("SELECT COUNT(*) FROM signal_instances WHERE market = 'Unknown'")
+        unknown_count = cursor.fetchone()[0]
+        
+        if unknown_count > 0:
+            console.print(f"Found {unknown_count} records with Unknown markets")
+            
+            # Delete signals with Unknown markets (they're likely Totals)
+            cursor.execute("DELETE FROM signal_instances WHERE market = 'Unknown'")
+            
+            conn.commit()
+            console.print(f"Removed {unknown_count} Unknown market records (likely Totals)")
+        else:
+            console.print("No Unknown market records found")
+            
+    except Exception as e:
+        conn.rollback()
+        console.print(f"[bold red]Error fixing unknown markets: {str(e)}[/bold red]")
+        
+    finally:
+        conn.close()
+
 def db_inspection_menu(db_path='orderbook_analyzer.db'):
     """Enhanced database inspection menu with navigation"""
     console.clear()
@@ -2880,10 +3055,12 @@ def db_inspection_menu(db_path='orderbook_analyzer.db'):
     console.print("5. Advanced queries")
     console.print("6. Search team history")
     console.print("7. View recent analysis results")
-    console.print("8. Return to main menu")
+    console.print("8. View active signals with persistence")
+    console.print("9. Return to main menu")
     console.print("0. Exit")
+    console.print('11. Fix existing "Unknown" markets')
     
-    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"], default="8")
+    choice = Prompt.ask("Enter choice", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8",'9','0','11'], default="8")
     
     if choice == "1":
         inspect_database(db_path)
@@ -2914,13 +3091,381 @@ def db_inspection_menu(db_path='orderbook_analyzer.db'):
         input("Press Enter to continue...")
         return None
     elif choice == "8":
+        display_active_signals(db_path)
+        console.print()
+        input("Press Enter to continue...")
+        return None
+    elif choice == "9":
         return "main"
     elif choice == "0":
         return "exit"
+    elif choice == '11':
+        fix_existing_unknown_markets(db_path)
+        console.print()
+        input("Press Enter to continue...")
+        return None
+
+def initialize_signal_tracking(db_path='orderbook_analyzer.db'):
+    """Add tables for tracking signal persistence over time"""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    
+    # Create signal_instances table to store every occurrence
+    c.execute('''CREATE TABLE IF NOT EXISTS signal_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id TEXT NOT NULL,
+        team TEXT NOT NULL,
+        signal_type TEXT NOT NULL,
+        market TEXT NOT NULL,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        strength TEXT,
+        details TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY (game_id) REFERENCES games(game_id)
+    )''')
+    
+    # Create index for faster lookups
+    c.execute('CREATE INDEX IF NOT EXISTS idx_signal_game_team ON signal_instances(game_id, team, signal_type, market)')
+    
+    conn.commit()
+    conn.close()
+    print("Signal tracking tables initialized")
+
+def is_total_market(market, signal_data):
+    """Determine if a signal is for a Total market"""
+    # Check the market name
+    if market and isinstance(market, str):
+        if 'total' in market.lower() or 'over' in market.lower() or 'under' in market.lower():
+            return True
+    
+    # Check signal data
+    if isinstance(signal_data, dict):
+        # Convert to string and check for total-related terms
+        signal_str = str(signal_data).lower()
+        if 'total' in signal_str and ('over' in signal_str or 'under' in signal_str):
+            return True
+        
+        # Check specific fields that might indicate a total
+        if signal_data.get('Market') == 'Total' or signal_data.get('market') == 'Total':
+            return True
+            
+        # Look for total-specific fields
+        if 'total' in signal_data or 'Total' in signal_data:
+            return True
+    
+    return False
+
+
+def process_signal(cursor, game_id, team, signal_type, market, strength, signal_data, current_time):
+    """Process an individual signal instance"""
+    global new_signals, updated_signals
+    
+    # Skip if missing essential data
+    if not team:
+        return
+    
+    # Skip Total markets
+    if is_total_market(market, signal_data):
+        return
+    
+    # Ensure we have a valid market
+    if not market:
+        if signal_type == 'unmatched_liquidity':
+            market = 'Moneyline'  # Default for unmatched liquidity
+        else:
+            market = 'Unknown'
+    
+    # Check if this signal already exists
+    cursor.execute('''
+    SELECT id, occurrence_count FROM signal_instances 
+    WHERE game_id = ? AND team = ? AND signal_type = ? AND market = ? AND is_active = 1
+    ''', (game_id, team, signal_type, market))
+    
+    existing = cursor.fetchone()
+    
+    if existing:
+        # Update existing signal
+        signal_id, count = existing
+        cursor.execute('''
+        UPDATE signal_instances 
+        SET last_seen = ?, occurrence_count = ?, strength = ?, details = ?
+        WHERE id = ?
+        ''', (
+            current_time, 
+            count + 1, 
+            strength,
+            json.dumps(signal_data, cls=NumpyEncoder),
+            signal_id
+        ))
+        updated_signals += 1
+    else:
+        # Insert new signal
+        cursor.execute('''
+        INSERT INTO signal_instances 
+        (game_id, team, signal_type, market, first_seen, last_seen, strength, details, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ''', (
+            game_id,
+            team,
+            signal_type,
+            market,
+            current_time,
+            current_time,
+            strength,
+            json.dumps(signal_data, cls=NumpyEncoder)
+        ))
+        new_signals += 1
+
+
+def track_signals(all_analyses, db_path='orderbook_analyzer.db'):
+    """Track signals over time, excluding Total markets from signal tracking"""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    
+    # Initialize counters in a global scope for this function
+    global new_signals, updated_signals
+    new_signals = 0
+    updated_signals = 0
+    
+    current_time = datetime.now().isoformat()
+    
+    try:
+        for game_id, analysis in all_analyses.items():
+            # Process sharp signals
+            sharp_signals = analysis.get('sharp_signals', [])
+            for signal in sharp_signals:
+                team = signal.get('signal', '')
+                market = signal.get('market', '')
+                
+                # Skip Total markets
+                if is_total_market(market, signal):
+                    continue
+                
+                strength = signal.get('strength', '')
+                process_signal(c, game_id, team, 'sharp', market, strength, signal, current_time)
+            
+            # Process unmatched liquidity signals
+            unmatched = analysis.get('unmatched_liquidity', {})
+            
+            # Process moneyline signals
+            for signal in unmatched.get('moneyline_signals', []):
+                team = signal.get('team', '')
+                market = 'Moneyline'
+                strength = signal.get('significance', '')
+                
+                process_signal(c, game_id, team, 'unmatched_liquidity', market, strength, signal, current_time)
+            
+            # Process spread signals
+            for signal in unmatched.get('spread_signals', []):
+                team = signal.get('team', '')
+                spread_value = signal.get('spread', '')
+                market = f"Spread {spread_value}" if spread_value else 'Spread'
+                strength = signal.get('significance', '')
+                
+                process_signal(c, game_id, team, 'unmatched_liquidity', market, strength, signal, current_time)
+            
+            # Process top book imbalance signals
+            top_book = analysis.get('top_book_imbalance', {})
+            
+            # Process moneyline signals
+            for signal in top_book.get('moneyline_signals', []):
+                team = signal.get('signal', '')
+                market = 'Moneyline'
+                strength = signal.get('significance', '')
+                
+                process_signal(c, game_id, team, 'top_book_imbalance', market, strength, signal, current_time)
+            
+            # Process spread signals
+            for signal in top_book.get('spread_signals', []):
+                team = signal.get('signal', '')
+                spread_value = signal.get('main_spread', '')
+                market = f"Spread {spread_value}" if spread_value else 'Spread'
+                strength = signal.get('significance', '')
+                
+                process_signal(c, game_id, team, 'top_book_imbalance', market, strength, signal, current_time)
+                
+        # Mark old signals as inactive
+        c.execute('''
+        UPDATE signal_instances 
+        SET is_active = 0 
+        WHERE last_seen < datetime('now', '-30 minutes') 
+        AND is_active = 1
+        ''')
+        
+        inactive_count = c.rowcount
+        
+        conn.commit()
+        print(f"Signal tracking complete: {new_signals} new, {updated_signals} updated, {inactive_count} marked inactive")
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"Error tracking signals: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+    finally:
+        conn.close()
+def process_signal_group(cursor, game_id, signals, signal_type, current_time):
+    """Process a group of signals of the same type"""
+    new_signals = 0
+    updated_signals = 0
+    
+    for signal in signals:
+        team = signal.get('team') or signal.get('signal', '')
+        
+        # Fix for unmatched_liquidity market display
+        if signal_type == 'unmatched_liquidity':
+            # Try to extract market information from different sources
+            if 'spread' in signal:
+                market = f"Spread {signal.get('spread', '')}"
+            elif signal.get('market') == 'Moneyline' or signal.get('side') == 'Moneyline':
+                market = 'Moneyline'
+            else:
+                # Check if it's in a nested structure
+                spread_value = signal.get('spread', '')
+                if spread_value:
+                    market = f"Spread {spread_value}"
+                else:
+                    # Try to infer from the signal data structure or name
+                    signal_data_str = json.dumps(signal).lower()
+                    if 'moneyline' in signal_data_str:
+                        market = 'Moneyline'
+                    elif 'spread' in signal_data_str:
+                        market = 'Spread'
+                    else:
+                        market = 'Unknown'
+                        print(f"WARNING: Inferred market '{market}' for {signal_type} signal for team {team}")
+        else:
+            # For other signal types, get market directly
+            market = signal.get('market', '')
+        
+        strength = signal.get('strength') or signal.get('significance', '')
+        
+        # Check if this signal already exists
+        cursor.execute('''
+        SELECT id, occurrence_count FROM signal_instances 
+        WHERE game_id = ? AND team = ? AND signal_type = ? AND market = ? AND is_active = 1
+        ''', (game_id, team, signal_type, market))
+        
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing signal
+            signal_id, count = existing
+            cursor.execute('''
+            UPDATE signal_instances 
+            SET last_seen = ?, occurrence_count = ?, strength = ?, details = ?
+            WHERE id = ?
+            ''', (
+                current_time, 
+                count + 1, 
+                strength,
+                json.dumps(signal, cls=NumpyEncoder),  # Use NumpyEncoder to handle NumPy types
+                signal_id
+            ))
+            updated_signals += 1
+        else:
+            # Insert new signal
+            cursor.execute('''
+            INSERT INTO signal_instances 
+            (game_id, team, signal_type, market, first_seen, last_seen, strength, details, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ''', (
+                game_id,
+                team,
+                signal_type,
+                market,
+                current_time,
+                current_time,
+                strength,
+                json.dumps(signal, cls=NumpyEncoder)  # Use NumpyEncoder to handle NumPy types
+            ))
+            new_signals += 1
+    
+    return new_signals, updated_signals
+
+
+
+def query_active_signals(db_path='orderbook_analyzer.db'):
+    """Query all currently active signals with persistence information"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    query = """
+    SELECT si.id, si.game_id, si.team, si.signal_type, si.market, 
+           si.first_seen, si.last_seen, si.occurrence_count, si.strength,
+           g.home_team, g.away_team, g.event_name
+    FROM signal_instances si
+    JOIN games g ON si.game_id = g.game_id
+    WHERE si.is_active = 1
+    ORDER BY si.occurrence_count DESC, si.last_seen DESC
+    """
+    
+    c.execute(query)
+    results = [dict(row) for row in c.fetchall()]
+    conn.close()
+    
+    return results
+
+def display_active_signals(db_path='orderbook_analyzer.db'):
+    """Display all active signals with persistence information"""
+    from rich.console import Console
+    from rich.table import Table
+    
+    console = Console()
+    signals = query_active_signals(db_path)
+    
+    if not signals:
+        console.print("[yellow]No active signals found[/yellow]")
+        return
+    
+    table = Table(title="Active Signals with Persistence")
+    table.add_column("Game", style="cyan")
+    table.add_column("Signal", style="green")
+    table.add_column("Type", style="yellow")
+    table.add_column("Market", style="magenta")
+    table.add_column("Persist", justify="right", style="bold red")
+    table.add_column("Strength", style="blue")
+    table.add_column("First Seen", style="dim")
+    table.add_column("Last Seen", style="dim")
+    
+    for signal in signals:
+        # Calculate time difference in minutes
+        first_seen = datetime.fromisoformat(signal['first_seen'])
+        last_seen = datetime.fromisoformat(signal['last_seen'])
+        duration_mins = round((last_seen - first_seen).total_seconds() / 60)
+        
+        # Format persistence display
+        if duration_mins > 0:
+            persistence = f"{signal['occurrence_count']}x ({duration_mins}m)"
+        else:
+            persistence = f"{signal['occurrence_count']}x"
+        
+        table.add_row(
+            f"{signal['away_team']} @ {signal['home_team']}",
+            signal['team'],
+            signal['signal_type'],
+            signal['market'],
+            persistence,
+            signal['strength'],
+            signal['first_seen'].split('T')[1][:8],
+            signal['last_seen'].split('T')[1][:8]
+        )
+    
+    console.print(table)
+
+
+
+
 
 def main():
     """Main execution function with improved navigation"""
     db_path = 'orderbook_analyzer.db'
+    ensure_database_initialized(db_path)
+    initialize_signal_tracking(db_path)
     
     while True:
         console.clear()
